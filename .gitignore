@@ -1,0 +1,27 @@
+# Виртуальное окружение
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Ключи и секреты
+.env
+*.secret
+
+# Сгенерированные HTML
+*.html
+
+# IDE
+.vscode/
+.idea/
+
+# Временные файлы
+*.tmp
+*.log
+.DS_Store

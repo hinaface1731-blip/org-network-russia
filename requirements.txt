@@ -1,0 +1,7 @@
+networkx>=3.0
+streamlit>=1.28
+pandas>=2.0
+httpx>=0.25
+python-louvain>=0.16
+scipy>=1.10
+pyvis>=0.3
