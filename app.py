@@ -114,6 +114,31 @@ with st.sidebar:
 - ЦБ РФ
 """)
 
+
+    st.markdown("---")
+    st.markdown("**🗄 Кэш SQLite**")
+    
+    from cache import get_cache
+    cache = get_cache()
+    stats = cache.stats()
+    
+    col1, col2 = st.columns(2)
+    col1.metric("Записей", stats["total_entries"])
+    col2.metric("Размер", f"{stats['size_mb']} MB")
+    
+    if st.button("🧹 Очистить просроченное"):
+        deleted = cache.clear_expired()
+        st.success(f"Удалено {deleted} записей")
+        st.rerun()
+    
+    if st.button("💣 Полная очистка кэша"):
+        import sqlite3
+        with sqlite3.connect(cache.db_path) as conn:
+            conn.execute("DELETE FROM dadata_cache")
+            conn.commit()
+        st.success("Кэш очищен полностью")
+        st.rerun()
+        
 # ---------------------------------------------------------------------------
 # Основная панель
 # ---------------------------------------------------------------------------
@@ -137,7 +162,7 @@ if mode == "Ego-граф (по ИНН)":
     )
     if st.button("🔍 Построить граф", type="primary"):
         with st.spinner("Загружаю данные…"):
-            builder = OrgGraphBuilder()
+            builder = OrgGraphBuilder(max_depth=depth)
             G = builder.build_ego_graph(inn_input.strip(), depth=depth)
             G = enrich_graph_with_metrics(G)
             st.session_state["G"] = G

@@ -10,6 +10,7 @@ import time
 import logging
 from typing import Optional
 import httpx
+from cache import get_cache
 
 logger = logging.getLogger(__name__)
 
@@ -25,28 +26,22 @@ HEADERS = {
 
 def search_org_by_inn(inn: str) -> Optional[dict]:
     """
-    Запрашивает DaData по ИНН и возвращает нормализованный словарь:
-    {
-        "inn": str,
-        "kpp": str,
-        "name": str,          # полное наименование
-        "short_name": str,
-        "ogrn": str,
-        "status": str,        # "ACTIVE" / "LIQUIDATING" / "LIQUIDATED"
-        "okved": str,         # основной ОКВЭД
-        "okved_name": str,
-        "address": str,
-        "founders": list[dict],   # [{"inn": ..., "name": ..., "type": "FL"|"UL"}]
-        "managers": list[dict],   # [{"inn": ..., "name": ..., "post": ...}]
-        "capital": float | None,
-        "employee_count": int | None,
-    }
-
-    Если DaData недоступна или токен не задан — возвращает заглушку (synthetic data).
+    Запрашивает DaData по ИНН и возвращает нормализованный словарь.
+    Использует SQLite-кэш для ускорения повторных запросов.
     """
+    # Проверяем кэш
+    cache = get_cache()
+    cached = cache.get(inn)
+    if cached:
+        return cached
+
+    # Проверяем синтетическую базу
     if DADATA_TOKEN in ("YOUR_DADATA_TOKEN_HERE", ""):
         logger.warning("DaData token not set — using synthetic stub for INN=%s", inn)
-        return _synthetic_stub(inn)
+        result = _synthetic_stub(inn)
+        if result:
+            cache.set(inn, result)
+        return result
 
     payload = {"query": inn, "count": 1}
 
@@ -56,18 +51,34 @@ def search_org_by_inn(inn: str) -> Optional[dict]:
             resp.raise_for_status()
     except httpx.HTTPStatusError as e:
         logger.error("DaData HTTP error %s for INN=%s", e.response.status_code, inn)
-        return None
+        # Пробуем синтетику как fallback
+        result = _synthetic_stub(inn)
+        if result:
+            cache.set(inn, result)
+        return result
     except httpx.RequestError as e:
         logger.error("DaData request failed for INN=%s: %s", inn, e)
-        return None
+        result = _synthetic_stub(inn)
+        if result:
+            cache.set(inn, result)
+        return result
 
     suggestions = resp.json().get("suggestions", [])
     if not suggestions:
         logger.warning("No suggestions from DaData for INN=%s", inn)
-        return None
+        result = _synthetic_stub(inn)
+        if result:
+            cache.set(inn, result)
+        return result
 
     raw = suggestions[0]["data"]
-    return _parse_dadata(inn, raw)
+    result = _parse_dadata(inn, raw)
+    
+    # Сохраняем в кэш
+    if result:
+        cache.set(inn, result)
+    
+    return result
 
 
 def _parse_dadata(inn: str, d: dict) -> dict:

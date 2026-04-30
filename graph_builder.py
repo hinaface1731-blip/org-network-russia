@@ -1,14 +1,13 @@
 """
 graph_builder.py — построение мультиграфа связей между организациями.
-Расширенная версия: аффилированные связи, рекурсивный обход учредителей.
+Версия для бесплатного API DaData.
 """
 
 import logging
-from collections import defaultdict
 from typing import Callable, Optional
 import networkx as nx
 
-from fetcher import search_org_by_inn, batch_fetch, find_affiliated_companies
+from fetcher import search_org_by_inn, batch_fetch
 
 logger = logging.getLogger(__name__)
 
@@ -22,23 +21,20 @@ def _norm_name(name: str) -> str:
 
 
 class OrgGraphBuilder:
-    """
-    Строит граф NetworkX из данных об организациях.
-    Граф — MultiGraph: между двумя узлами может быть несколько рёбер.
-    """
-
-    def __init__(self, use_affiliated: bool = True, max_depth: int = 2):
+    def __init__(self, max_depth: int = 2):
         self.G: nx.MultiGraph = nx.MultiGraph()
         self._orgs: dict[str, dict] = {}
-        self._use_affiliated = use_affiliated
         self._max_depth = max_depth
-        self._visited_affiliated: set[str] = set()
+        self._loaded_inns: set[str] = set()
 
     def add_org(self, org: dict) -> None:
-        inn = org["inn"]
+        inn = org.get("inn", "")
         if not inn:
             return
+        if inn in self._orgs:
+            return
         self._orgs[inn] = org
+        self._loaded_inns.add(inn)
         self.G.add_node(
             inn,
             label=org.get("short_name") or org.get("name", inn),
@@ -48,7 +44,6 @@ class OrgGraphBuilder:
             status=org.get("status", ""),
             employee_count=org.get("employee_count"),
             capital=org.get("capital"),
-            revenue=None,  # Будет заполнено позже
         )
 
     def add_edge_type(self, inn1: str, inn2: str, edge_type: str, **attrs) -> None:
@@ -64,32 +59,36 @@ class OrgGraphBuilder:
         if not o1 or not o2:
             return
 
-        # --- parent_child ---
-        o2_founder_inns = {f["inn"] for f in o2.get("founders", []) if f["inn"]}
-        o1_founder_inns = {f["inn"] for f in o1.get("founders", []) if f["inn"]}
+        # parent_child
+        o2_founder_inns = {f["inn"] for f in o2.get("founders", []) if f.get("inn")}
+        o1_founder_inns = {f["inn"] for f in o1.get("founders", []) if f.get("inn")}
 
         if inn1 in o2_founder_inns:
-            share = next((f["share"] for f in o2["founders"] if f["inn"] == inn1), None)
-            control = "majority" if (share and share > 50) else "minority"
-            self.add_edge_type(inn1, inn2, "parent_child", share=share, control=control)
+            share = next((f["share"] for f in o2["founders"] if f.get("inn") == inn1), None)
+            self.add_edge_type(inn1, inn2, "parent_child", share=share)
 
         if inn2 in o1_founder_inns:
-            share = next((f["share"] for f in o1["founders"] if f["inn"] == inn2), None)
-            control = "majority" if (share and share > 50) else "minority"
-            self.add_edge_type(inn2, inn1, "parent_child", share=share, control=control)
+            share = next((f["share"] for f in o1["founders"] if f.get("inn") == inn2), None)
+            self.add_edge_type(inn2, inn1, "parent_child", share=share)
 
-        # --- common_founder ---
+        # common_founder
         common_founders = o1_founder_inns & o2_founder_inns
         for cf_inn in common_founders:
             self.add_edge_type(inn1, inn2, "common_founder", via=cf_inn)
+        
+        # Общие учредители-физлица по ФИО
+        f1_names = {_norm_name(f["name"]) for f in o1.get("founders", []) if f.get("name") and f.get("type") == "PHYSICAL"}
+        f2_names = {_norm_name(f["name"]) for f in o2.get("founders", []) if f.get("name") and f.get("type") == "PHYSICAL"}
+        for name in f1_names & f2_names:
+            self.add_edge_type(inn1, inn2, "common_founder", via=name, physical=True)
 
-        # --- common_director ---
-        mgr1 = {_norm_name(m["name"]) for m in o1.get("managers", []) if m["name"]}
-        mgr2 = {_norm_name(m["name"]) for m in o2.get("managers", []) if m["name"]}
+        # common_director
+        mgr1 = {_norm_name(m["name"]) for m in o1.get("managers", []) if m.get("name")}
+        mgr2 = {_norm_name(m["name"]) for m in o2.get("managers", []) if m.get("name")}
         for mgr in mgr1 & mgr2:
             self.add_edge_type(inn1, inn2, "common_director", via=mgr)
 
-        # --- same_industry (взвешенная) ---
+        # same_industry
         ok1 = o1.get("okved", "")
         ok2 = o2.get("okved", "")
         if ok1 and ok2:
@@ -98,42 +97,28 @@ class OrgGraphBuilder:
             elif _okved2(ok1) == _okved2(ok2):
                 self.add_edge_type(inn1, inn2, "same_industry", okved=_okved2(ok1), weight=0.5)
 
-    def _load_affiliated(self, inn: str, depth: int = 1) -> None:
-        """Рекурсивно загружает аффилированные компании."""
-        if depth <= 0 or inn in self._visited_affiliated:
-            return
-        self._visited_affiliated.add(inn)
-
-        affiliated = find_affiliated_companies(inn)
-        for aff in affiliated:
-            aff_inn = aff.get("inn", "")
-            if aff_inn and aff_inn not in self._orgs:
-                self.add_org(aff)
-                # Аффилированная связь — особый тип ребра
-                self.add_edge_type(inn, aff_inn, "affiliated", 
-                                   via="общие учредители/руководители")
-                # Рекурсивно углубляемся
-                if depth > 1:
-                    self._load_affiliated(aff_inn, depth - 1)
-
-    def _load_founders_recursive(self, inn: str, depth: int) -> None:
-        """Рекурсивно загружает учредителей-юрлица."""
-        if depth <= 0:
+    def load_recursive(self, inn: str, depth: int) -> None:
+        """Рекурсивно загружает организацию и её учредителей-юрлиц."""
+        if depth <= 0 or inn in self._loaded_inns:
             return
         
-        org = self._orgs.get(inn)
+        logger.info("Loading INN=%s (depth=%d)", inn, depth)
+        org = search_org_by_inn(inn)
         if not org:
+            logger.warning("Not found: %s", inn)
             return
+        
+        self.add_org(org)
 
-        for f in org.get("founders", []):
-            if f.get("type") == "UL" and f["inn"] and f["inn"] not in self._orgs:
-                founder_data = search_org_by_inn(f["inn"])
-                if founder_data:
-                    self.add_org(founder_data)
-                    self._load_founders_recursive(f["inn"], depth - 1)
+        # Загружаем учредителей-юрлиц
+        for founder in org.get("founders", []):
+            founder_inn = founder.get("inn", "")
+            founder_type = founder.get("type", "UNKNOWN")
+            
+            if founder_type == "LEGAL" and founder_inn and founder_inn != inn:
+                self.load_recursive(founder_inn, depth - 1)
 
     def build_edges(self) -> None:
-        """Строит рёбра между всеми загруженными организациями."""
         inns = list(self._orgs.keys())
         for i in range(len(inns)):
             for j in range(i + 1, len(inns)):
@@ -141,46 +126,23 @@ class OrgGraphBuilder:
         logger.info("Graph built: %d nodes, %d edges", 
                     self.G.number_of_nodes(), self.G.number_of_edges())
 
-    def build_full_graph(self, inn_list: list[str], 
-                         load_affiliated: bool = True,
-                         founder_depth: int = 2) -> nx.MultiGraph:
-        """
-        Строит полный граф с аффилированными связями и рекурсивным обходом учредителей.
-        """
-        # Загружаем основные компании
-        data = batch_fetch(inn_list)
-        for org in data.values():
-            self.add_org(org)
+    def build_ego_graph(self, center_inn: str, depth: int = 2) -> nx.MultiGraph:
+        self.load_recursive(center_inn, depth)
+        self.build_edges()
+        return self.G
 
-        if load_affiliated:
-            logger.info("Loading affiliated companies...")
-            for inn in inn_list:
-                self._load_affiliated(inn, depth=2)
-
-        if founder_depth > 0:
-            logger.info("Loading founders recursively (depth=%d)...", founder_depth)
-            current_inns = list(self._orgs.keys())
-            for inn in current_inns:
-                self._load_founders_recursive(inn, founder_depth)
-
+    def build_full_graph(self, inn_list: list[str], founder_depth: int = 2) -> nx.MultiGraph:
+        for inn in inn_list:
+            self.load_recursive(inn, founder_depth)
         self.build_edges()
         return self.G
 
 
-# ---------------------------------------------------------------------------
-# Обновлённые фабричные функции
-# ---------------------------------------------------------------------------
-
-def build_graph_from_inn_list(inn_list: list[str], 
-                              use_affiliated: bool = True,
-                              founder_depth: int = 2) -> nx.MultiGraph:
-    """Загружает данные по списку ИНН и строит полный граф с аффилированными связями."""
-    builder = OrgGraphBuilder(use_affiliated=use_affiliated, max_depth=founder_depth)
-    return builder.build_full_graph(inn_list, load_affiliated=use_affiliated, 
-                                   founder_depth=founder_depth)
+def build_graph_from_inn_list(inn_list: list[str], founder_depth: int = 2) -> nx.MultiGraph:
+    builder = OrgGraphBuilder(max_depth=founder_depth)
+    return builder.build_full_graph(inn_list, founder_depth=founder_depth)
 
 
 def build_ego_graph(center_inn: str, depth: int = 2) -> nx.MultiGraph:
-    """Удобная обёртка для построения ego-графа."""
-    builder = OrgGraphBuilder()
+    builder = OrgGraphBuilder(max_depth=depth)
     return builder.build_ego_graph(center_inn, depth)
