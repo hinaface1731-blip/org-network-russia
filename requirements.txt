@@ -1,7 +1,17 @@
 networkx>=3.0
 streamlit>=1.28
 pandas>=2.0
-httpx>=0.25
+httpx[http2]>=0.25
 python-louvain>=0.16
 scipy>=1.10
-pyvis>=0.3
+tqdm>=4.65
+
+# Опционально (PostgreSQL кэш)
+# psycopg2-binary>=2.9
+
+# Опционально (очередь задач для 50k+ ИНН)
+# rq>=1.16
+# redis>=5.0
+
+# Gephi-экспорт (уже есть в networkx)
+# lxml>=4.9  # нужен для write_gexf на некоторых системах
