@@ -77,8 +77,8 @@ class OrgGraphBuilder:
             self.add_edge_type(inn1, inn2, "common_founder", via=cf_inn)
         
         # Общие учредители-физлица по ФИО
-        f1_names = {_norm_name(f["name"]) for f in o1.get("founders", []) if f.get("name") and f.get("type") == "PHYSICAL"}
-        f2_names = {_norm_name(f["name"]) for f in o2.get("founders", []) if f.get("name") and f.get("type") == "PHYSICAL"}
+        f1_names = {_norm_name(f["name"]) for f in o1.get("founders", []) if f.get("name") and f.get("type") == "FL"}
+        f2_names = {_norm_name(f["name"]) for f in o2.get("founders", []) if f.get("name") and f.get("type") == "FL"}
         for name in f1_names & f2_names:
             self.add_edge_type(inn1, inn2, "common_founder", via=name, physical=True)
 

@@ -1,6 +1,6 @@
 """
-visualizer.py — генерация интерактивного HTML-графа с цветовыми кластерами.
-Группировка по отраслям с гравитацией, как на картах Twitch/Википедии.
+visualizer.py — генерация интерактивного HTML-графа с Canvas-рендерингом.
+Оптимизирован для 5000+ узлов. Цветовые кластеры по отраслям.
 """
 
 import json
@@ -11,7 +11,7 @@ import networkx as nx
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Константы оформления
+# Константы
 # ---------------------------------------------------------------------------
 
 EDGE_COLORS = {
@@ -30,19 +30,21 @@ EDGE_TITLES = {
     "affiliated":      "Аффилированность",
 }
 
-# Отраслевые группы и их цвета (яркие, для кластеров)
 INDUSTRY_CONFIG = {
-    "Нефтегаз":          {"color": "#ff6b35", "center": [0.25, 0.35]},
-    "Банки и финансы":   {"color": "#e63946", "center": [0.65, 0.25]},
-    "Металлургия":       {"color": "#ffb703", "center": [0.15, 0.65]},
-    "Энергетика":        {"color": "#f4a261", "center": [0.50, 0.15]},
-    "Телеком и ИТ":      {"color": "#457b9d", "center": [0.80, 0.55]},
-    "Розничная торговля": {"color": "#2ec4b6", "center": [0.70, 0.80]},
-    "Транспорт":         {"color": "#8338ec", "center": [0.35, 0.80]},
-    "Госорганы":         {"color": "#6d2b3d", "center": [0.90, 0.15]},
-    "Химия":             {"color": "#06d6a0", "center": [0.10, 0.45]},
-    "Строительство":     {"color": "#fb8b24", "center": [0.55, 0.70]},
-    "Прочее":            {"color": "#8b949e", "center": [0.50, 0.50]},
+    "Нефтегаз":          {"color": "#ff6b35"},
+    "Банки и финансы":   {"color": "#e63946"},
+    "Металлургия":       {"color": "#ffb703"},
+    "Энергетика":        {"color": "#f4a261"},
+    "Телеком и ИТ":      {"color": "#457b9d"},
+    "Розничная торговля": {"color": "#2ec4b6"},
+    "Транспорт":         {"color": "#8338ec"},
+    "Госорганы":         {"color": "#6d2b3d"},
+    "Химия":             {"color": "#06d6a0"},
+    "Строительство":     {"color": "#fb8b24"},
+    "Машиностроение":    {"color": "#9b5de5"},
+    "Фармацевтика":      {"color": "#00bbf9"},
+    "Сельское хозяйство":{"color": "#38b000"},
+    "Прочее":            {"color": "#8b949e"},
 }
 
 INDUSTRY_GROUPS = {
@@ -56,7 +58,11 @@ INDUSTRY_GROUPS = {
     "Госорганы":         ["84"],
     "Химия":             ["20", "21", "22"],
     "Строительство":     ["41", "42", "43"],
+    "Машиностроение":    ["28", "29", "30"],
+    "Фармацевтика":      ["21.2"],
+    "Сельское хозяйство":["01", "02", "03"],
 }
+
 
 def get_industry_group(okved: str) -> str:
     if not okved:
@@ -67,28 +73,25 @@ def get_industry_group(okved: str) -> str:
                 return group
     return "Прочее"
 
+
 def get_industry_color(okved: str) -> str:
     industry = get_industry_group(okved)
     return INDUSTRY_CONFIG.get(industry, INDUSTRY_CONFIG["Прочее"])["color"]
 
-def get_industry_center(okved: str) -> list:
-    industry = get_industry_group(okved)
-    return INDUSTRY_CONFIG.get(industry, INDUSTRY_CONFIG["Прочее"])["center"]
 
 def _node_size(G: nx.Graph, inn: str) -> float:
     n = G.nodes[inn]
     pr = n.get("pagerank", 0.01)
-    revenue = n.get("revenue") or 0
     emp = n.get("employee_count") or 0
     capital = n.get("capital") or 0
 
-    size = 8
-    size += pr * 3000
-    size += min(revenue / 1e10, 15) if revenue else 0
-    size += min(emp / 10000, 10) if emp else 0
-    size += min(capital / 5e8, 6) if capital else 0
+    size = 3
+    size += pr * 1500
+    size += min(emp / 10000, 6) if emp else 0
+    size += min(capital / 5e8, 4) if capital else 0
 
-    return max(10, min(size, 60))
+    return max(2.5, min(size, 30))
+
 
 def _node_title(G: nx.Graph, inn: str) -> str:
     n = G.nodes[inn]
@@ -102,46 +105,29 @@ def _node_title(G: nx.Graph, inn: str) -> str:
         f"<b>{n.get('name', inn)}</b><br>"
         f"ИНН: {inn}<br>"
         f"Отрасль: {industry}<br>"
-        f"ОКВЭД: {n.get('okved','')} {n.get('okved_name','')}<br>"
+        f"ОКВЭД: {n.get('okved','')}<br>"
         f"Статус: {n.get('status','')}<br>"
-        f"Уставной капитал: {cap_str}<br>"
         f"Сотрудников: {emp_str}<br>"
+        f"Капитал: {cap_str}<br>"
         f"PageRank: {n.get('pagerank', 0):.4f}<br>"
-        f"Betweenness: {n.get('betweenness', 0):.4f}<br>"
         f"Кластер: {n.get('community', '?')}"
     )
 
-def _edge_width(edge_data: dict) -> float:
-    etype = edge_data.get("type", "")
-    if etype == "parent_child":
-        share = edge_data.get("share") or 0
-        return 1.0 + (share / 100) * 6
-    elif etype == "common_director":
-        return 2.0
-    elif etype == "same_industry":
-        return 0.5
-    return 1.5
-
-# ---------------------------------------------------------------------------
-# Основная функция
-# ---------------------------------------------------------------------------
 
 def export_to_html_d3(G: nx.MultiGraph, filename: str = "org_network.html") -> str:
+    """Canvas-рендеринг для больших графов (5000+ узлов)."""
+    
     nodes = []
     for inn in G.nodes():
         n = G.nodes[inn]
-        industry = get_industry_group(n.get("okved", ""))
-        center = get_industry_center(n.get("okved", ""))
         nodes.append({
             "id": inn,
-            "label": n.get("label", inn),
+            "label": n.get("label", inn)[:30],
             "title": n.get("name", inn),
-            "group": n.get("community", 0),
-            "industry": industry,
-            "industryColor": INDUSTRY_CONFIG[industry]["color"],
-            "industryCenter": center,
-            "pagerank": n.get("pagerank", 0.01),
+            "industry": get_industry_group(n.get("okved", "")),
+            "color": get_industry_color(n.get("okved", "")),
             "size": _node_size(G, inn),
+            "pagerank": n.get("pagerank", 0.01),
             "tooltip": _node_title(G, inn),
         })
 
@@ -157,11 +143,10 @@ def export_to_html_d3(G: nx.MultiGraph, filename: str = "org_network.html") -> s
             "source": u,
             "target": v,
             "type": etype,
-            "title": EDGE_TITLES.get(etype, etype),
             "color": EDGE_COLORS.get(etype, "#888"),
-            "width": _edge_width(data),
-            "share": data.get("share"),
+            "title": EDGE_TITLES.get(etype, etype),
             "via": data.get("via", ""),
+            "share": data.get("share"),
         })
 
     graph_json = json.dumps({"nodes": nodes, "links": links}, ensure_ascii=False)
@@ -173,151 +158,44 @@ def export_to_html_d3(G: nx.MultiGraph, filename: str = "org_network.html") -> s
 <title>Сеть организаций РФ</title>
 <script src="https://d3js.org/d3.v7.min.js"></script>
 <style>
-  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-  body {{ 
-    background: #0a0e14; 
-    font-family: 'Segoe UI', Arial, sans-serif; 
-    color: #c9d1d9; 
-    overflow: hidden; 
-  }}
-  svg {{ width: 100vw; height: 100vh; }}
-  
-  .cluster-zone {{
-    fill-opacity: 0.06;
-    stroke-width: 2;
-    stroke-opacity: 0.3;
-  }}
-  
-  .cluster-label {{
-    font-size: 14px;
-    font-weight: bold;
-    fill-opacity: 0.5;
-    pointer-events: none;
-    text-anchor: middle;
-  }}
-  
-  .link {{
-    stroke-opacity: 0.5;
-    cursor: pointer;
-    transition: stroke-opacity 0.3s;
-  }}
-  .link:hover {{ stroke-opacity: 1; }}
-  
-  .node circle {{
-    stroke: #1a1f2b;
-    stroke-width: 2px;
-    cursor: pointer;
-    transition: stroke-width 0.2s, stroke 0.2s;
-    filter: drop-shadow(0 0 4px rgba(0,0,0,0.5));
-  }}
-  .node circle:hover {{ 
-    stroke-width: 3px; 
-    stroke: #fff;
-    filter: drop-shadow(0 0 8px rgba(255,255,255,0.3));
-  }}
-  .node text {{
-    font-size: 10px;
-    fill: #c9d1d9;
-    pointer-events: none;
-    text-shadow: 0 0 4px rgba(0,0,0,0.9);
-    opacity: 0.8;
-  }}
-  
-  #tooltip {{
-    position: fixed;
-    background: rgba(10,14,20,0.96);
-    border: 1px solid #30363d;
-    border-radius: 8px;
-    padding: 12px 16px;
-    font-size: 12px;
-    pointer-events: none;
-    max-width: 340px;
-    line-height: 1.7;
-    display: none;
-    box-shadow: 0 8px 32px rgba(0,0,0,0.8);
-    z-index: 1000;
-  }}
-  
-  #legend {{
-    position: fixed;
-    top: 16px;
-    right: 16px;
-    background: rgba(10,14,20,0.94);
-    border: 1px solid #30363d;
-    border-radius: 10px;
-    padding: 14px 18px;
-    font-size: 11px;
-    z-index: 999;
-    max-height: 85vh;
-    overflow-y: auto;
-    backdrop-filter: blur(10px);
-  }}
-  
-  .legend-title {{
-    font-weight: bold;
-    margin-bottom: 6px;
-    font-size: 12px;
-    text-transform: uppercase;
-    letter-spacing: 1px;
-  }}
-  
-  .legend-item {{
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin: 4px 0;
-  }}
-  
-  .legend-dot {{
-    width: 12px;
-    height: 12px;
-    border-radius: 50%;
-    flex-shrink: 0;
-    border: 1px solid rgba(255,255,255,0.2);
-  }}
-  
-  .legend-line {{
-    width: 20px;
-    height: 3px;
-    border-radius: 2px;
-    flex-shrink: 0;
-  }}
-  
-  #search {{
-    position: fixed;
-    top: 16px;
-    left: 16px;
-    z-index: 999;
-    display: flex;
-    gap: 6px;
-  }}
-  
-  #search input {{
-    background: rgba(10,14,20,0.94);
-    border: 1px solid #30363d;
-    border-radius: 6px;
-    color: #c9d1d9;
-    padding: 8px 12px;
-    font-size: 13px;
-    width: 220px;
-    outline: none;
-    backdrop-filter: blur(10px);
-  }}
-  
-  #search input:focus {{ border-color: #58a6ff; }}
-  
-  #search button {{
-    background: #238636;
-    border: none;
-    border-radius: 6px;
-    color: white;
-    padding: 8px 14px;
-    cursor: pointer;
-    font-size: 13px;
-    font-weight: bold;
-  }}
-  
-  #search button:hover {{ background: #2ea043; }}
+* {{ margin:0; padding:0; box-sizing:border-box; }}
+body {{ background:#0a0e14; overflow:hidden; font-family:Segoe UI,Arial,sans-serif; }}
+canvas {{ display:block; }}
+#tooltip {{
+  position:fixed; background:rgba(10,14,20,0.96); border:1px solid #30363d;
+  border-radius:8px; padding:12px 16px; font-size:12px; pointer-events:none;
+  max-width:340px; line-height:1.7; display:none; z-index:1000;
+  box-shadow:0 8px 32px rgba(0,0,0,0.8); color:#c9d1d9;
+}}
+#legend {{
+  position:fixed; top:16px; right:16px; background:rgba(10,14,20,0.94);
+  border:1px solid #30363d; border-radius:10px; padding:14px 18px;
+  font-size:11px; z-index:999; max-height:85vh; overflow-y:auto;
+  backdrop-filter:blur(10px); color:#c9d1d9;
+}}
+.legend-title {{ font-weight:bold; margin-bottom:6px; font-size:12px; text-transform:uppercase; letter-spacing:1px; }}
+.legend-item {{ display:flex; align-items:center; gap:8px; margin:3px 0; }}
+.legend-dot {{ width:10px; height:10px; border-radius:50%; flex-shrink:0; border:1px solid rgba(255,255,255,0.2); }}
+.legend-line {{ width:20px; height:3px; border-radius:2px; flex-shrink:0; }}
+#search {{
+  position:fixed; top:16px; left:16px; z-index:999; display:flex; gap:6px;
+}}
+#search input {{
+  background:rgba(10,14,20,0.94); border:1px solid #30363d; border-radius:6px;
+  color:#c9d1d9; padding:8px 12px; font-size:13px; width:220px; outline:none;
+  backdrop-filter:blur(10px);
+}}
+#search input:focus {{ border-color:#58a6ff; }}
+#search button {{
+  background:#238636; border:none; border-radius:6px; color:#fff;
+  padding:8px 14px; cursor:pointer; font-size:13px; font-weight:bold;
+}}
+#search button:hover {{ background:#2ea043; }}
+#stats {{
+  position:fixed; bottom:16px; left:16px; background:rgba(10,14,20,0.94);
+  border:1px solid #30363d; border-radius:8px; padding:8px 14px;
+  font-size:11px; color:#8b949e; z-index:999;
+}}
 </style>
 </head>
 <body>
@@ -329,204 +207,210 @@ def export_to_html_d3(G: nx.MultiGraph, filename: str = "org_network.html") -> s
 </div>
 
 <div id="legend">
-  <div class="legend-title" style="color:#58a6ff;margin-top:0">🏭 ОТРАСЛЕВЫЕ КЛАСТЕРЫ</div>
+  <div class="legend-title" style="color:#58a6ff">🏭 ОТРАСЛИ</div>
   {''.join(f'<div class="legend-item"><div class="legend-dot" style="background:{c["color"]}"></div>{n}</div>' for n,c in INDUSTRY_CONFIG.items() if n != "Прочее")}
-  
   <div style="margin:8px 0;border-top:1px solid #30363d"></div>
-  <div class="legend-title" style="color:#f4a261">🔗 ТИПЫ СВЯЗЕЙ</div>
+  <div class="legend-title" style="color:#f4a261">🔗 СВЯЗИ</div>
   <div class="legend-item"><div class="legend-line" style="background:#e63946"></div>Учредительство</div>
   <div class="legend-item"><div class="legend-line" style="background:#f4a261"></div>Общий учредитель</div>
   <div class="legend-item"><div class="legend-line" style="background:#2a9d8f"></div>Общий руководитель</div>
   <div class="legend-item"><div class="legend-line" style="background:#457b9d"></div>Одна отрасль</div>
-  
-  <div style="margin-top:10px;font-size:10px;color:#8b949e">
-    Размер = значимость<br>
-    Ближе = больше связей
-  </div>
 </div>
 
-<svg id="graph"></svg>
+<div id="stats">
+  Узлов: <b>{len(nodes)}</b> | Связей: <b>{len(links)}</b> | 
+  FPS: <span id="fps">—</span>
+</div>
+
+<canvas id="canvas"></canvas>
 
 <script>
 const graphData = {graph_json};
 const W = window.innerWidth;
 const H = window.innerHeight;
 
-const svg = d3.select("#graph");
-const g = svg.append("g");
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+canvas.width = W * devicePixelRatio;
+canvas.height = H * devicePixelRatio;
+canvas.style.width = W + "px";
+canvas.style.height = H + "px";
+ctx.scale(devicePixelRatio, devicePixelRatio);
+
 const tooltip = document.getElementById("tooltip");
 
-// Отрисовка кластерных зон (полупрозрачные круги)
-const clusters = g.append("g").attr("class", "clusters");
-const clusterData = {{}};
-graphData.nodes.forEach(n => {{
-  if (!clusterData[n.industry]) {{
-    clusterData[n.industry] = {{
-      industry: n.industry,
-      color: n.industryColor,
-      center: n.industryCenter
-    }};
-  }}
-}});
+// Индексы для быстрого поиска
+const nodeMap = new Map(graphData.nodes.map(n => [n.id, n]));
+const nodeIndex = new Map(graphData.nodes.map((n, i) => [n.id, i]));
 
-Object.values(clusterData).forEach(c => {{
-  clusters.append("circle")
-    .attr("class", "cluster-zone")
-    .attr("cx", c.center[0] * W)
-    .attr("cy", c.center[1] * H)
-    .attr("r", 100)
-    .attr("fill", c.color)
-    .attr("stroke", c.color);
-  
-  clusters.append("text")
-    .attr("class", "cluster-label")
-    .attr("x", c.center[0] * W)
-    .attr("y", c.center[1] * H - 110)
-    .attr("fill", c.color)
-    .text(c.industry);
-}});
+// Transform
+let transform = d3.zoomIdentity;
 
-svg.call(d3.zoom()
-  .scaleExtent([0.1, 8])
-  .on("zoom", e => g.attr("transform", e.transform)));
+// FPS
+let frames = 0, lastTime = performance.now();
 
+// Симуляция
 const sim = d3.forceSimulation(graphData.nodes)
   .force("link", d3.forceLink(graphData.links).id(d => d.id)
-    .distance(d => {{
-      if (d.type === 'parent_child') return 80;
-      if (d.type === 'common_director') return 60;
-      if (d.type === 'same_industry') return 150;
-      return 100;
-    }})
-    .strength(d => {{
-      if (d.type === 'parent_child') return 0.7;
-      if (d.type === 'common_director') return 0.5;
-      return 0.2;
-    }}))
-  .force("charge", d3.forceManyBody()
-    .strength(d => -150 - d.size * 4))
+    .distance(d => d.type === 'common_director' ? 40 : 80)
+    .strength(d => d.type === 'common_director' ? 0.5 : 0.2))
+  .force("charge", d3.forceManyBody().strength(d => -30 - d.size * 3))
   .force("center", d3.forceCenter(W/2, H/2))
-  // Притяжение к центру своего отраслевого кластера
-  .force("cluster", alpha => {{
-    graphData.nodes.forEach(d => {{
-      const center = d.industryCenter;
-      const cx = center[0] * W;
-      const cy = center[1] * H;
-      d.vx += (cx - d.x) * 0.02 * alpha;
-      d.vy += (cy - d.y) * 0.02 * alpha;
-    }});
-  }})
-  .force("collision", d3.forceCollide(d => d.size + 8));
+  .force("collision", d3.forceCollide(d => d.size + 2))
+  .alphaDecay(0.02);
 
-const link = g.append("g")
-  .selectAll("line")
-  .data(graphData.links)
-  .join("line")
-  .attr("class", "link")
-  .attr("stroke", d => d.color)
-  .attr("stroke-width", d => d.width)
-  .attr("stroke-dasharray", d => d.type === "same_industry" ? "4,4" : "none");
+// Canvas отрисовка
+function draw() {{
+  ctx.save();
+  ctx.clearRect(0, 0, W, H);
+  ctx.translate(transform.x, transform.y);
+  ctx.scale(transform.k, transform.k);
 
-const node = g.append("g")
-  .selectAll("g")
-  .data(graphData.nodes)
-  .join("g")
-  .attr("class", "node")
-  .call(d3.drag()
-    .on("start", (e, d) => {{
-      if (!e.active) sim.alphaTarget(0.3).restart();
-      d.fx = d.x; d.fy = d.y;
-    }})
-    .on("drag", (e, d) => {{
-      d.fx = e.x; d.fy = e.y;
-    }})
-    .on("end", (e, d) => {{
-      if (!e.active) sim.alphaTarget(0);
-      d.fx = null; d.fy = null;
-    }}));
-
-node.append("circle")
-  .attr("r", d => d.size)
-  .attr("fill", d => d.industryColor);
-
-node.append("text")
-  .attr("dy", d => d.size + 12)
-  .attr("text-anchor", "middle")
-  .text(d => d.label.length > 22 ? d.label.substring(0, 20) + '...' : d.label);
-
-node
-  .on("mouseover", (e, d) => {{
-    tooltip.innerHTML = d.tooltip;
-    tooltip.style.display = "block";
-    link.attr("stroke-opacity", l =>
-      l.source.id === d.id || l.target.id === d.id ? 1 : 0.1
-    );
-    node.selectAll("circle").attr("opacity", n =>
-      n.id === d.id || graphData.links.some(l =>
-        (l.source.id === d.id && l.target.id === n.id) ||
-        (l.target.id === d.id && l.source.id === n.id)
-      ) ? 1 : 0.2
-    );
-  }})
-  .on("mousemove", e => {{
-    tooltip.style.left = Math.min(e.clientX + 15, W - 350) + "px";
-    tooltip.style.top = Math.min(e.clientY + 15, H - 200) + "px";
-  }})
-  .on("mouseout", () => {{
-    tooltip.style.display = "none";
-    link.attr("stroke-opacity", 0.5);
-    node.selectAll("circle").attr("opacity", 1);
-  }})
-  .on("dblclick", (e, d) => {{
-    svg.transition().duration(750).call(
-      d3.zoom().transform,
-      d3.zoomIdentity.translate(W/2, H/2).scale(2.5).translate(-d.x, -d.y)
-    );
+  // Рёбра
+  graphData.links.forEach(l => {{
+    const s = l.source, t = l.target;
+    if (!s.x || !t.x) return;
+    ctx.beginPath();
+    ctx.moveTo(s.x, s.y);
+    ctx.lineTo(t.x, t.y);
+    ctx.strokeStyle = l.color;
+    ctx.lineWidth = l.type === 'common_director' ? 1.5 / transform.k : 0.5 / transform.k;
+    ctx.globalAlpha = l.type === 'same_industry' ? 0.15 : 0.4;
+    ctx.stroke();
   }});
 
-link
-  .on("mouseover", (e, d) => {{
-    tooltip.innerHTML = `<b>${{d.title}}</b>${{d.via ? '<br>Через: ' + d.via : ''}}${{d.share ? '<br>Доля: ' + d.share + '%' : ''}}`;
-    tooltip.style.display = "block";
-  }})
-  .on("mousemove", e => {{
-    tooltip.style.left = Math.min(e.clientX + 15, W - 350) + "px";
-    tooltip.style.top = Math.min(e.clientY + 15, H - 100) + "px";
-  }})
-  .on("mouseout", () => {{ tooltip.style.display = "none"; }});
+  // Узлы
+  graphData.nodes.forEach(n => {{
+    if (!n.x) return;
+    const r = Math.max(2, n.size / Math.sqrt(transform.k));
+    
+    // Тень
+    ctx.beginPath();
+    ctx.arc(n.x, n.y, r + 1, 0, 2*Math.PI);
+    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+    ctx.fill();
 
-function searchNode() {{
-  const query = document.getElementById("searchInput").value.toLowerCase();
-  const found = graphData.nodes.find(n => 
-    n.label.toLowerCase().includes(query) || 
-    n.id.includes(query) ||
-    n.title.toLowerCase().includes(query)
-  );
-  if (found && found.x && found.y) {{
-    svg.transition().duration(750).call(
-      d3.zoom().transform,
-      d3.zoomIdentity.translate(W/2, H/2).scale(3).translate(-found.x, -found.y)
-    );
-    node.selectAll("circle")
-      .attr("stroke", n => n.id === found.id ? "#fff" : "#1a1f2b")
-      .attr("stroke-width", n => n.id === found.id ? 4 : 2);
-    setTimeout(() => node.selectAll("circle").attr("stroke", "#1a1f2b").attr("stroke-width", 2), 3000);
+    // Круг
+    ctx.beginPath();
+    ctx.arc(n.x, n.y, r, 0, 2*Math.PI);
+    ctx.fillStyle = n.color;
+    ctx.globalAlpha = 0.9;
+    ctx.fill();
+    ctx.strokeStyle = '#1a1f2b';
+    ctx.lineWidth = 1 / transform.k;
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+
+    // Подпись (только при достаточном зуме)
+    if (transform.k > 0.5 && r > 4) {{
+      ctx.fillStyle = '#c9d1d9';
+      ctx.font = `${{Math.max(8, 10/transform.k)}}px Segoe UI`;
+      ctx.textAlign = 'center';
+      ctx.fillText(n.label.length > 20 ? n.label.slice(0,18)+'..' : n.label, n.x, n.y + r + 12/transform.k);
+    }}
+  }});
+
+  ctx.restore();
+
+  // FPS
+  frames++;
+  const now = performance.now();
+  if (now - lastTime >= 1000) {{
+    document.getElementById("fps").textContent = frames;
+    frames = 0;
+    lastTime = now;
   }}
 }}
 
-sim.on("tick", () => {{
-  link
-    .attr("x1", d => d.source.x)
-    .attr("y1", d => d.source.y)
-    .attr("x2", d => d.target.x)
-    .attr("y2", d => d.target.y);
-  node.attr("transform", d => `translate(${{d.x}},${{d.y}})`);
+sim.on("tick", draw);
+
+// Zoom
+const zoom = d3.zoom()
+  .scaleExtent([0.05, 10])
+  .on("zoom", e => {{
+    transform = e.transform;
+    draw();
+  }});
+
+d3.select(canvas).call(zoom)
+  .on("dblclick.zoom", null);
+
+// Поиск
+function searchNode() {{
+  const q = document.getElementById("searchInput").value.toLowerCase();
+  const found = graphData.nodes.find(n => n.label.toLowerCase().includes(q) || n.id.includes(q));
+  if (found && found.x) {{
+    const scale = 4;
+    transform = d3.zoomIdentity
+      .translate(W/2, H/2)
+      .scale(scale)
+      .translate(-found.x, -found.y);
+    draw();
+  }}
+}}
+
+// Hover
+let hoveredNode = null;
+canvas.addEventListener("mousemove", e => {{
+  const mx = (e.clientX - transform.x) / transform.k;
+  const my = (e.clientY - transform.y) / transform.k;
+  
+  hoveredNode = null;
+  for (const n of graphData.nodes) {{
+    if (!n.x) continue;
+    const r = Math.max(2, n.size / Math.sqrt(transform.k));
+    const dx = n.x - mx, dy = n.y - my;
+    if (dx*dx + dy*dy < r*r) {{
+      hoveredNode = n;
+      canvas.style.cursor = 'pointer';
+      tooltip.innerHTML = n.tooltip;
+      tooltip.style.display = 'block';
+      tooltip.style.left = Math.min(e.clientX + 15, W - 350) + "px";
+      tooltip.style.top = Math.min(e.clientY + 15, H - 200) + "px";
+      return;
+    }}
+  }}
+  canvas.style.cursor = 'grab';
+  tooltip.style.display = 'none';
+}});
+
+canvas.addEventListener("click", e => {{
+  if (hoveredNode) {{
+    const scale = 4;
+    transform = d3.zoomIdentity
+      .translate(W/2, H/2)
+      .scale(scale)
+      .translate(-hoveredNode.x, -hoveredNode.y);
+    draw();
+  }}
+}});
+
+// Ресайз
+window.addEventListener("resize", () => {{
+  const W2 = window.innerWidth, H2 = window.innerHeight;
+  canvas.width = W2 * devicePixelRatio;
+  canvas.height = H2 * devicePixelRatio;
+  canvas.style.width = W2 + "px";
+  canvas.style.height = H2 + "px";
+  ctx.scale(devicePixelRatio, devicePixelRatio);
+  draw();
+}});
+
+// Клавиши
+window.addEventListener("keydown", e => {{
+  if (e.key === 'r' || e.key === 'R') {{
+    transform = d3.zoomIdentity.translate(W/2, H/2).scale(1);
+    draw();
+  }}
+  if (e.key === 'f' || e.key === 'F') {{
+    document.getElementById("searchInput").focus();
+  }}
 }});
 </script>
 </body>
 </html>"""
 
     Path(filename).write_text(html, encoding="utf-8")
-    logger.info("D3 graph exported to %s (%d nodes, %d edges)", 
+    logger.info("Canvas graph exported to %s (%d nodes, %d edges)", 
                 filename, G.number_of_nodes(), G.number_of_edges())
     return filename

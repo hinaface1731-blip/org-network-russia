@@ -391,3 +391,53 @@ def batch_fetch(inns: list[str], delay: float = 0.3) -> dict[str, dict]:
             result[inn] = data
         time.sleep(delay)
     return result
+
+
+# ---------------------------------------------------------------------------
+# Поиск организаций через DaData API
+# ---------------------------------------------------------------------------
+
+DADATA_SEARCH_URL = "https://suggestions.dadata.ru/suggestions/api/4_1/rs/suggest/party"
+
+
+def search_orgs_by_query(
+    query: str,
+    status: str = "ACTIVE",
+    index_type: str = "ul",
+    count: int = 100,
+) -> list[dict]:
+    """
+    Ищет организации по названию/региону через DaData suggestions API.
+    status: ACTIVE, LIQUIDATING, LIQUIDATED
+    index_type: ul (юрлица), ip (ИП), entrepreneur (самозанятые)
+    """
+    if not DADATA_TOKEN:
+        logger.warning("No DaData token — returning empty list")
+        return []
+
+    results = []
+    try:
+        payload = {
+            "query": query,
+            "count": min(count, 100),
+            "filters": [
+                {"field": "status", "value": status},
+                {"field": "type", "value": index_type},
+            ],
+        }
+        with httpx.Client(timeout=30) as client:
+            resp = client.post(DADATA_SEARCH_URL, headers=HEADERS, json=payload)
+            resp.raise_for_status()
+            suggestions = resp.json().get("suggestions", [])
+
+            for s in suggestions:
+                data = s.get("data", {})
+                inn = data.get("inn", "")
+                if inn:
+                    results.append(_parse_dadata(inn, data))
+
+    except Exception as e:
+        logger.error("Search failed for query=%s: %s", query, e)
+
+    logger.info("Found %d organizations for %s", len(results), query)
+    return results
